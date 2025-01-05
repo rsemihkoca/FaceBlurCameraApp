@@ -121,6 +121,7 @@ struct CameraSettingsSection: View {
 struct SettingsView: View {
     @ObservedObject var cameraManager: CameraManager
     @Environment(\.presentationMode) var presentationMode
+    @State private var ipAddress: String = NetworkUtils.getIPAddress() ?? "unknown"
     
     var body: some View {
         NavigationView {
@@ -133,7 +134,7 @@ struct SettingsView: View {
                 }
                 
                 Section(header: Text("RTSP Stream")) {
-                    Text("URL: rtsp://admin:admin@localhost:8554")
+                    Text("rtsp://admin:admin@\(ipAddress):8554")
                         .foregroundColor(.gray)
                 }
             }
