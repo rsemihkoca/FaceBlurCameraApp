@@ -39,4 +39,7 @@ rm -rf ~/Library/Developer/Xcode/DerivedData/faceblurcamera-*
 faceblurcamera üzerine geldim folder olan, build rules each file yaptım ve target membership'i faceblurcameraApp yaptım.
 
 copy bundle resources'tan info.plist'i çıkarttım.
+
+compile sources'ta normalde swift paketlerini görmezken bu şekilde görüyorum.
+hatta copy bundle resources da görüyorum. assets.xcassets 
 ![alt text](image.png)
