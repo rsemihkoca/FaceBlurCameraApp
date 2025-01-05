@@ -476,30 +476,21 @@ class RTSPStreamer {
             rtcpAddr.sin_addr.s_addr = inet_addr(ipAddress)
             client.rtcpAddress = rtcpAddr
             
-            // Bind server RTP socket
-            var serverAddr = sockaddr_in()
-            serverAddr.sin_family = sa_family_t(AF_INET)
-            serverAddr.sin_port = (self.port).bigEndian
-            serverAddr.sin_addr.s_addr = INADDR_ANY
-            
-            let bindResult = withUnsafePointer(to: &serverAddr) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    bind(client.rtpSocket, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
-            }
-            
-            if bindResult != 0 {
-                logger.error("Failed to bind RTP socket: \(errno)")
-                respondWithError(client: client, code: 500, message: "Internal Server Error")
-                return
-            }
+            // Set socket options for reuse
+            var reuse: Int32 = 1
+            setsockopt(client.rtpSocket, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+            setsockopt(client.rtcpSocket, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
         }
+        
+        // Generate unique server ports for this client
+        client.serverRTPPort = UInt16(self.port) + UInt16(client.socket * 2)
+        client.serverRTCPPort = client.serverRTPPort + 1
         
         let response = """
         RTSP/1.0 200 OK\r
         CSeq: \(client.cseq)\r
         Session: \(client.sessionId)\r
-        Transport: RTP/AVP;unicast;client_port=\(client.clientRTPPort)-\(client.clientRTCPPort);server_port=\(self.port)-\(self.port+1)\r
+        Transport: RTP/AVP;unicast;client_port=\(client.clientRTPPort)-\(client.clientRTCPPort);server_port=\(client.serverRTPPort)-\(client.serverRTCPPort)\r
         \r
         """
         
@@ -669,6 +660,8 @@ class RTSPClient {
     var setupCompleted = false
     var clientRTPPort: UInt16 = 0
     var clientRTCPPort: UInt16 = 0
+    var serverRTPPort: UInt16 = 0
+    var serverRTCPPort: UInt16 = 0
     
     // RTP/RTCP sockets and addresses
     var rtpSocket: Int32 = -1
