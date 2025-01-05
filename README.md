@@ -33,3 +33,5 @@ uygulama açılınca rtsp yayını başlatılacak. ve ekranda yatay olarak gör�
 
 
 rm -rf ~/Library/Developer/Xcode/DerivedData/faceblurcamera-*
+
+![alt text](image.png)
