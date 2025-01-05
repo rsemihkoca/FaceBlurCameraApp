@@ -6,8 +6,6 @@ import os.log
 
 class RTSPStreamer {
     private let port: UInt16 = 8554
-    private let username = "admin"
-    private let password = "admin"
     private var isStreaming = false
     private var serverSocket: Int32 = -1
     
@@ -285,9 +283,26 @@ class RTSPStreamer {
     }
     
     private func handleClient(socket: Int32) {
-        let client = RTSPClient(socket: socket, username: username, password: password)
+        var addr = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let result = withUnsafeMutablePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                getpeername(socket, sockaddrPtr, &len)
+            }
+        }
+        
+        guard result == 0 else {
+            logger.error("Failed to get peer name: \(errno)")
+            close(socket)
+            return
+        }
+        
+        let ipAddress = String(cString: inet_ntoa(addr.sin_addr))
+        
+        let client = RTSPClient(socket: socket)
+        client.ipAddress = ipAddress
         clients[socket] = client
-        logger.info("New client connected: \(socket)")
+        logger.info("New client connected: \(socket) from IP: \(ipAddress)")
         
         var buffer = [UInt8](repeating: 0, count: 4096)
         
@@ -389,15 +404,22 @@ class RTSPStreamer {
     }
     
     private func respondToDescribe(url: String, client: RTSPClient) {
+        guard let ipAddress = client.ipAddress else {
+            logger.error("Client IP address not available")
+            respondWithError(client: client, code: 500, message: "Internal Server Error")
+            return
+        }
+        
         let sdp = """
         v=0
-        o=- \(Date().timeIntervalSince1970) 1 IN IP4 0.0.0.0
+        o=- \(Date().timeIntervalSince1970) 1 IN IP4 \(ipAddress)
         s=FaceBlurCamera Stream
-        c=IN IP4 0.0.0.0
+        c=IN IP4 \(ipAddress)
         t=0 0
         m=video \(self.port) RTP/AVP \(rtpPayloadType)
         a=rtpmap:\(rtpPayloadType) H264/90000
         a=fmtp:\(rtpPayloadType) profile-level-id=42e01f;packetization-mode=1
+        a=control:trackID=1
         """
         
         let response = """
@@ -416,10 +438,61 @@ class RTSPStreamer {
     }
     
     private func respondToSetup(client: RTSPClient) {
+        guard let ipAddress = client.ipAddress else {
+            logger.error("Client IP address not available")
+            respondWithError(client: client, code: 500, message: "Internal Server Error")
+            return
+        }
+        
         // Only respond if we have valid client ports
         guard client.clientRTPPort > 0 && client.clientRTCPPort > 0 else {
+            logger.error("Invalid client ports in SETUP request")
             respondWithError(client: client, code: 400, message: "Bad Request - Invalid Transport")
             return
+        }
+        
+        // Create RTP and RTCP server sockets if needed
+        if client.rtpSocket == -1 {
+            client.rtpSocket = socket(AF_INET, SOCK_DGRAM, 0)
+            client.rtcpSocket = socket(AF_INET, SOCK_DGRAM, 0)
+            
+            if client.rtpSocket == -1 || client.rtcpSocket == -1 {
+                logger.error("Failed to create RTP/RTCP sockets")
+                respondWithError(client: client, code: 500, message: "Internal Server Error")
+                return
+            }
+            
+            // Set up client address for RTP
+            var rtpAddr = sockaddr_in()
+            rtpAddr.sin_family = sa_family_t(AF_INET)
+            rtpAddr.sin_port = client.clientRTPPort.bigEndian
+            rtpAddr.sin_addr.s_addr = inet_addr(ipAddress)
+            client.rtpAddress = rtpAddr
+            
+            // Set up client address for RTCP
+            var rtcpAddr = sockaddr_in()
+            rtcpAddr.sin_family = sa_family_t(AF_INET)
+            rtcpAddr.sin_port = client.clientRTCPPort.bigEndian
+            rtcpAddr.sin_addr.s_addr = inet_addr(ipAddress)
+            client.rtcpAddress = rtcpAddr
+            
+            // Bind server RTP socket
+            var serverAddr = sockaddr_in()
+            serverAddr.sin_family = sa_family_t(AF_INET)
+            serverAddr.sin_port = (self.port).bigEndian
+            serverAddr.sin_addr.s_addr = INADDR_ANY
+            
+            let bindResult = withUnsafePointer(to: &serverAddr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    bind(client.rtpSocket, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+            
+            if bindResult != 0 {
+                logger.error("Failed to bind RTP socket: \(errno)")
+                respondWithError(client: client, code: 500, message: "Internal Server Error")
+                return
+            }
         }
         
         let response = """
@@ -429,27 +502,45 @@ class RTSPStreamer {
         Transport: RTP/AVP;unicast;client_port=\(client.clientRTPPort)-\(client.clientRTCPPort);server_port=\(self.port)-\(self.port+1)\r
         \r
         """
+        
+        logger.info("Sending SETUP response to client \(client.socket)")
         if !client.send(response) {
             logger.error("Failed to send SETUP response to client \(client.socket)")
             clients.removeValue(forKey: client.socket)
             close(client.socket)
+            return
         }
+        
+        logger.info("SETUP completed successfully for client \(client.socket)")
+        client.setupCompleted = true
     }
     
     private func respondToPlay(client: RTSPClient) {
+        guard client.setupCompleted else {
+            logger.error("Client \(client.socket) attempted PLAY before completing SETUP")
+            respondWithError(client: client, code: 455, message: "Method Not Valid in This State")
+            return
+        }
+        
         client.isPlaying = true
         let response = """
         RTSP/1.0 200 OK\r
         CSeq: \(client.cseq)\r
         Session: \(client.sessionId)\r
         Range: npt=0.000-\r
+        RTP-Info: url=rtsp://\(client.socket):8554/stream=0;seq=\(rtpSequenceNumber);rtptime=\(rtpTimestamp)\r
         \r
         """
+        
+        logger.info("Sending PLAY response to client \(client.socket)")
         if !client.send(response) {
             logger.error("Failed to send PLAY response to client \(client.socket)")
             clients.removeValue(forKey: client.socket)
             close(client.socket)
+            return
         }
+        
+        logger.info("Client \(client.socket) is now playing")
     }
     
     private func respondToPause(client: RTSPClient) {
@@ -498,7 +589,7 @@ class RTSPStreamer {
         var failedSockets: [Int32] = []
         
         for (socket, client) in clients where client.isPlaying {
-            if !client.send(packet) {
+            if !client.sendRTP(packet) {
                 logger.error("Failed to send RTP packet to client \(socket)")
                 failedSockets.append(socket)
             }
@@ -506,6 +597,7 @@ class RTSPStreamer {
         
         // Clean up failed clients
         for socket in failedSockets {
+            logger.info("Removing failed client \(socket)")
             clients.removeValue(forKey: socket)
             close(socket)
         }
@@ -570,19 +662,32 @@ class RTSPStreamer {
 
 class RTSPClient {
     let socket: Int32
-    let username: String
-    let password: String
     let sessionId: String
+    var ipAddress: String?
     var cseq: Int = 0
     var isPlaying = false
+    var setupCompleted = false
     var clientRTPPort: UInt16 = 0
     var clientRTCPPort: UInt16 = 0
     
-    init(socket: Int32, username: String, password: String) {
+    // RTP/RTCP sockets and addresses
+    var rtpSocket: Int32 = -1
+    var rtcpSocket: Int32 = -1
+    var rtpAddress: sockaddr_in?
+    var rtcpAddress: sockaddr_in?
+    
+    init(socket: Int32) {
         self.socket = socket
-        self.username = username
-        self.password = password
         self.sessionId = UUID().uuidString
+    }
+    
+    deinit {
+        if rtpSocket != -1 {
+            close(rtpSocket)
+        }
+        if rtcpSocket != -1 {
+            close(rtcpSocket)
+        }
     }
     
     func send(_ data: String) -> Bool {
@@ -595,6 +700,18 @@ class RTSPClient {
     func send(_ data: Data) -> Bool {
         let result = data.withUnsafeBytes { ptr in
             Darwin.send(socket, ptr.baseAddress, data.count, 0)
+        }
+        return result != -1
+    }
+    
+    func sendRTP(_ data: Data) -> Bool {
+        guard let addr = rtpAddress else { return false }
+        let result = data.withUnsafeBytes { ptr in
+            withUnsafePointer(to: addr) { addrPtr in
+                addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                    Darwin.sendto(rtpSocket, ptr.baseAddress, data.count, 0, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
         }
         return result != -1
     }
