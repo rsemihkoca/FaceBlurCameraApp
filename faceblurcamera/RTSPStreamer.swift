@@ -206,12 +206,18 @@ class RTSPStreamer {
     }
     
     func startStreaming() throws {
-        guard !isStreaming else { return }
+        guard !isStreaming else {
+            logger.info("RTSP server is already running")
+            return
+        }
+        
+        logger.info("Starting RTSP server on port \(self.port)")
         
         // Initialize server socket with error handling
         serverSocket = socket(AF_INET, SOCK_STREAM, 0)
         guard serverSocket >= 0 else {
-            logger.error("Failed to create server socket: \(errno)")
+            let error = errno
+            logger.error("Failed to create server socket: \(error)")
             throw RTSPError.socketCreationFailed
         }
         
@@ -219,7 +225,8 @@ class RTSPStreamer {
         var reuse: Int32 = 1
         let sockoptResult = setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
         guard sockoptResult >= 0 else {
-            logger.error("Failed to set SO_REUSEADDR: \(errno)")
+            let error = errno
+            logger.error("Failed to set SO_REUSEADDR: \(error)")
             close(serverSocket)
             throw RTSPError.socketCreationFailed
         }
@@ -236,19 +243,21 @@ class RTSPStreamer {
         }
         
         guard bindResult == 0 else {
-            print("Failed to bind server socket: \(errno)")
+            let error = errno
+            logger.error("Failed to bind server socket: \(error)")
             close(serverSocket)
-            return
+            throw RTSPError.socketBindFailed
         }
         
         guard listen(serverSocket, 5) == 0 else {
-            print("Failed to listen on server socket: \(errno)")
+            let error = errno
+            logger.error("Failed to listen on server socket: \(error)")
             close(serverSocket)
-            return
+            throw RTSPError.socketListenFailed
         }
         
         isStreaming = true
-        print("RTSP server started on port \(port)")
+        logger.info("RTSP server started successfully on port \(self.port)")
         
         // Start accepting connections in background
         DispatchQueue.global(qos: .userInitiated).async {
@@ -257,24 +266,28 @@ class RTSPStreamer {
     }
     
     private func acceptConnections() {
+        logger.info("Starting to accept RTSP connections")
         while isStreaming {
             var addr = sockaddr()
             var len = socklen_t(MemoryLayout<sockaddr>.size)
             let clientSocket = accept(serverSocket, &addr, &len)
             
             if clientSocket >= 0 {
+                logger.info("Accepted new RTSP connection: \(clientSocket)")
                 DispatchQueue.global(qos: .userInitiated).async {
                     self.handleClient(socket: clientSocket)
                 }
             } else if errno != EAGAIN {
-                print("Accept failed: \(errno)")
+                logger.error("Accept failed: \(errno)")
             }
         }
+        logger.info("Stopped accepting RTSP connections")
     }
     
     private func handleClient(socket: Int32) {
         let client = RTSPClient(socket: socket, username: username, password: password)
         clients[socket] = client
+        logger.info("New client connected: \(socket)")
         
         var buffer = [UInt8](repeating: 0, count: 4096)
         
@@ -282,19 +295,25 @@ class RTSPStreamer {
             let bytesRead = recv(socket, &buffer, buffer.count, 0)
             if bytesRead <= 0 {
                 if bytesRead < 0 {
-                    print("Read error: \(errno)")
+                    logger.error("Read error on socket \(socket): \(errno)")
+                } else {
+                    logger.info("Client disconnected: \(socket)")
                 }
                 break
             }
             
             let data = Data(bytes: buffer, count: bytesRead)
             if let request = String(data: data, encoding: .utf8) {
+                logger.debug("Received RTSP request from \(socket): \(request)")
                 handleRTSPRequest(request, client: client)
+            } else {
+                logger.error("Failed to decode RTSP request from \(socket)")
             }
         }
         
         clients.removeValue(forKey: socket)
         close(socket)
+        logger.info("Client connection closed: \(socket)")
     }
     
     private func handleRTSPRequest(_ request: String, client: RTSPClient) {
@@ -306,6 +325,20 @@ class RTSPStreamer {
         
         let method = components[0]
         let url = components[1]
+        
+        // Update CSeq from request headers
+        for line in lines {
+            if line.starts(with: "CSeq:") {
+                if let cseqStr = line.split(separator: ":").last?.trimmingCharacters(in: .whitespaces),
+                   let cseq = Int(cseqStr) {
+                    client.cseq = cseq
+                }
+            } else if line.starts(with: "Transport:") {
+                if let transportStr = line.split(separator: ":").last?.trimmingCharacters(in: .whitespaces) {
+                    parseTransportHeader(transportStr, for: client)
+                }
+            }
+        }
         
         switch method {
         case "OPTIONS":
@@ -325,6 +358,22 @@ class RTSPStreamer {
         }
     }
     
+    private func parseTransportHeader(_ transport: String, for client: RTSPClient) {
+        let components = transport.components(separatedBy: ";")
+        for component in components {
+            if component.contains("client_port=") {
+                let ports = component.split(separator: "=")[1].split(separator: "-")
+                if ports.count == 2,
+                   let rtpPort = UInt16(ports[0]),
+                   let rtcpPort = UInt16(ports[1]) {
+                    client.clientRTPPort = rtpPort
+                    client.clientRTCPPort = rtcpPort
+                    logger.info("Client ports set - RTP: \(rtpPort), RTCP: \(rtcpPort)")
+                }
+            }
+        }
+    }
+    
     private func respondToOptions(client: RTSPClient) {
         let response = """
         RTSP/1.0 200 OK\r
@@ -332,7 +381,11 @@ class RTSPStreamer {
         Public: OPTIONS, DESCRIBE, SETUP, PLAY, PAUSE, TEARDOWN\r
         \r
         """
-        client.send(response)
+        if !client.send(response) {
+            logger.error("Failed to send OPTIONS response to client \(client.socket)")
+            clients.removeValue(forKey: client.socket)
+            close(client.socket)
+        }
     }
     
     private func respondToDescribe(url: String, client: RTSPClient) {
@@ -342,7 +395,7 @@ class RTSPStreamer {
         s=FaceBlurCamera Stream
         c=IN IP4 0.0.0.0
         t=0 0
-        m=video \(port) RTP/AVP \(rtpPayloadType)
+        m=video \(self.port) RTP/AVP \(rtpPayloadType)
         a=rtpmap:\(rtpPayloadType) H264/90000
         a=fmtp:\(rtpPayloadType) profile-level-id=42e01f;packetization-mode=1
         """
@@ -355,18 +408,32 @@ class RTSPStreamer {
         \r
         \(sdp)
         """
-        client.send(response)
+        if !client.send(response) {
+            logger.error("Failed to send DESCRIBE response to client \(client.socket)")
+            clients.removeValue(forKey: client.socket)
+            close(client.socket)
+        }
     }
     
     private func respondToSetup(client: RTSPClient) {
+        // Only respond if we have valid client ports
+        guard client.clientRTPPort > 0 && client.clientRTCPPort > 0 else {
+            respondWithError(client: client, code: 400, message: "Bad Request - Invalid Transport")
+            return
+        }
+        
         let response = """
         RTSP/1.0 200 OK\r
         CSeq: \(client.cseq)\r
         Session: \(client.sessionId)\r
-        Transport: RTP/AVP;unicast;client_port=\(client.clientRTPPort)-\(client.clientRTCPPort);server_port=\(port)-\(port+1)\r
+        Transport: RTP/AVP;unicast;client_port=\(client.clientRTPPort)-\(client.clientRTCPPort);server_port=\(self.port)-\(self.port+1)\r
         \r
         """
-        client.send(response)
+        if !client.send(response) {
+            logger.error("Failed to send SETUP response to client \(client.socket)")
+            clients.removeValue(forKey: client.socket)
+            close(client.socket)
+        }
     }
     
     private func respondToPlay(client: RTSPClient) {
@@ -378,7 +445,11 @@ class RTSPStreamer {
         Range: npt=0.000-\r
         \r
         """
-        client.send(response)
+        if !client.send(response) {
+            logger.error("Failed to send PLAY response to client \(client.socket)")
+            clients.removeValue(forKey: client.socket)
+            close(client.socket)
+        }
     }
     
     private func respondToPause(client: RTSPClient) {
@@ -389,7 +460,11 @@ class RTSPStreamer {
         Session: \(client.sessionId)\r
         \r
         """
-        client.send(response)
+        if !client.send(response) {
+            logger.error("Failed to send PAUSE response to client \(client.socket)")
+            clients.removeValue(forKey: client.socket)
+            close(client.socket)
+        }
     }
     
     private func respondToTeardown(client: RTSPClient) {
@@ -400,7 +475,9 @@ class RTSPStreamer {
         Session: \(client.sessionId)\r
         \r
         """
-        client.send(response)
+        if !client.send(response) {
+            logger.error("Failed to send TEARDOWN response to client \(client.socket)")
+        }
         
         clients.removeValue(forKey: client.socket)
         close(client.socket)
@@ -412,12 +489,25 @@ class RTSPStreamer {
         CSeq: \(client.cseq)\r
         \r
         """
-        client.send(response)
+        if !client.send(response) {
+            logger.error("Failed to send error response to client \(client.socket)")
+        }
     }
     
     private func broadcastToClients(_ packet: Data) {
-        for client in clients.values where client.isPlaying {
-            client.send(packet)
+        var failedSockets: [Int32] = []
+        
+        for (socket, client) in clients where client.isPlaying {
+            if !client.send(packet) {
+                logger.error("Failed to send RTP packet to client \(socket)")
+                failedSockets.append(socket)
+            }
+        }
+        
+        // Clean up failed clients
+        for socket in failedSockets {
+            clients.removeValue(forKey: socket)
+            close(socket)
         }
     }
     
@@ -429,9 +519,12 @@ class RTSPStreamer {
         
         let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         
-        guard let encoder = videoEncoder else { return }
+        guard let encoder = videoEncoder else {
+            logger.error("Video encoder not initialized")
+            return
+        }
         
-        VTCompressionSessionEncodeFrame(
+        let status = VTCompressionSessionEncodeFrame(
             encoder,
             imageBuffer: imageBuffer,
             presentationTimeStamp: timestamp,
@@ -440,6 +533,10 @@ class RTSPStreamer {
             sourceFrameRefcon: nil,
             infoFlagsOut: nil
         )
+        
+        if status != noErr {
+            logger.error("Failed to encode video frame: \(status)")
+        }
     }
     
     func stopStreaming() {
@@ -488,15 +585,17 @@ class RTSPClient {
         self.sessionId = UUID().uuidString
     }
     
-    func send(_ data: String) {
-        _ = data.withCString { ptr in
+    func send(_ data: String) -> Bool {
+        let result = data.withCString { ptr in
             Darwin.send(socket, ptr, strlen(ptr), 0)
         }
+        return result != -1
     }
     
-    func send(_ data: Data) {
-        data.withUnsafeBytes { ptr in
-            _ = Darwin.send(socket, ptr.baseAddress, data.count, 0)
+    func send(_ data: Data) -> Bool {
+        let result = data.withUnsafeBytes { ptr in
+            Darwin.send(socket, ptr.baseAddress, data.count, 0)
         }
+        return result != -1
     }
 } 

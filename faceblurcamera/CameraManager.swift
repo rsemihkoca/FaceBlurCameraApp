@@ -1,8 +1,10 @@
 import AVFoundation
 import CoreMedia
 import SwiftUI
+import os.log
 
 class CameraManager: NSObject, ObservableObject {
+    private let logger = Logger(subsystem: "com.faceblurcamera", category: "CameraManager")
     @Published var isRunning = false
     @Published var previewLayer: AVCaptureVideoPreviewLayer?
     
@@ -33,12 +35,14 @@ class CameraManager: NSObject, ObservableObject {
     }
     
     private func setupCamera() {
+        logger.info("Setting up camera...")
+        captureSession.beginConfiguration()
         captureSession.sessionPreset = .hd1920x1080 // Close to 2K resolution (1920x1080)
         
         guard let device = AVCaptureDevice.default(.builtInWideAngleCamera,
                                                  for: .video,
                                                  position: .back) else {
-            print("Failed to get back camera")
+            logger.error("Failed to get back camera device")
             return
         }
         
@@ -48,48 +52,86 @@ class CameraManager: NSObject, ObservableObject {
             let input = try AVCaptureDeviceInput(device: device)
             if captureSession.canAddInput(input) {
                 captureSession.addInput(input)
+                logger.info("Added camera input successfully")
+            } else {
+                logger.error("Cannot add camera input to session")
+                return
             }
             
             let videoOutput = AVCaptureVideoDataOutput()
             videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "videoQueue"))
+            videoOutput.videoSettings = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ]
+            videoOutput.alwaysDiscardsLateVideoFrames = true
             
             if captureSession.canAddOutput(videoOutput) {
                 captureSession.addOutput(videoOutput)
+                logger.info("Added video output successfully")
+                
+                // Configure video orientation after adding output
+                if let connection = videoOutput.connection(with: .video) {
+                    connection.videoOrientation = .landscapeRight
+                    connection.isVideoMirrored = false
+                    logger.info("Configured video orientation")
+                }
+            } else {
+                logger.error("Cannot add video output to session")
+                return
             }
             
             self.videoOutput = videoOutput
             
             let previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
             previewLayer.videoGravity = .resizeAspectFill
+            if let connection = previewLayer.connection {
+                connection.videoOrientation = .landscapeRight
+                logger.info("Preview layer configured successfully")
+            }
             self.previewLayer = previewLayer
             
         } catch {
-            print("Error setting up camera: \(error.localizedDescription)")
+            logger.error("Error setting up camera: \(error.localizedDescription)")
         }
+        
+        captureSession.commitConfiguration()
+        logger.info("Camera setup completed")
     }
     
     func startCamera() {
-        guard !captureSession.isRunning else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.captureSession.startRunning()
+        guard !captureSession.isRunning else {
+            logger.info("Camera is already running")
+            return
+        }
+        
+        logger.info("Starting camera and RTSP stream...")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.captureSession.startRunning()
             do {
-                try self.rtspStreamer?.startStreaming()
+                try self?.rtspStreamer?.startStreaming()
+                self?.logger.info("RTSP streaming started successfully")
             } catch {
-                print("Failed to start RTSP streaming: \(error.localizedDescription)")
+                self?.logger.error("Failed to start RTSP streaming: \(error.localizedDescription)")
             }
             DispatchQueue.main.async {
-                self.isRunning = true
+                self?.isRunning = true
             }
         }
     }
     
     func stopCamera() {
-        guard captureSession.isRunning else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.captureSession.stopRunning()
-            self.rtspStreamer?.stopStreaming()
+        guard captureSession.isRunning else {
+            logger.info("Camera is already stopped")
+            return
+        }
+        
+        logger.info("Stopping camera and RTSP stream...")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.captureSession.stopRunning()
+            self?.rtspStreamer?.stopStreaming()
+            self?.logger.info("Camera and RTSP stream stopped")
             DispatchQueue.main.async {
-                self.isRunning = false
+                self?.isRunning = false
             }
         }
     }
@@ -176,7 +218,16 @@ class CameraManager: NSObject, ObservableObject {
 
 extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard CMSampleBufferIsValid(sampleBuffer) else {
+            logger.error("Invalid sample buffer received")
+            return
+        }
+        
         // Forward the frame to RTSP streamer
         rtspStreamer?.processVideoFrame(sampleBuffer)
+    }
+    
+    func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        logger.warning("Dropped frame detected")
     }
 }

@@ -13,28 +13,35 @@ struct ContentView: View {
     @State private var showSettings = false
     
     var body: some View {
-        ZStack {
-            // Camera preview
-            CameraPreviewView(previewLayer: cameraManager.previewLayer)
-                .edgesIgnoringSafeArea(.all)
-            
-            VStack {
-                Spacer()
+        GeometryReader { geometry in
+            ZStack {
+                // Camera preview
+                if let previewLayer = cameraManager.previewLayer {
+                    CameraPreviewView(previewLayer: previewLayer)
+                        .edgesIgnoringSafeArea(.all)
+                } else {
+                    Color.black
+                        .edgesIgnoringSafeArea(.all)
+                }
                 
-                HStack {
-                    Button(action: {
-                        showSettings.toggle()
-                    }) {
-                        Image(systemName: "gear")
-                            .font(.title)
-                            .foregroundColor(.white)
-                            .padding()
-                            .background(Color.black.opacity(0.5))
-                            .clipShape(Circle())
-                    }
-                    .padding()
-                    
+                VStack {
                     Spacer()
+                    
+                    HStack {
+                        Button(action: {
+                            showSettings.toggle()
+                        }) {
+                            Image(systemName: "gear")
+                                .font(.title)
+                                .foregroundColor(.white)
+                                .padding()
+                                .background(Color.black.opacity(0.5))
+                                .clipShape(Circle())
+                        }
+                        .padding()
+                        
+                        Spacer()
+                    }
                 }
             }
         }
@@ -47,6 +54,8 @@ struct ContentView: View {
         .onDisappear {
             cameraManager.stopCamera()
         }
+        .statusBar(hidden: true)
+        .preferredColorScheme(.dark)
     }
 }
 
@@ -54,9 +63,11 @@ struct CameraPreviewView: UIViewRepresentable {
     let previewLayer: AVCaptureVideoPreviewLayer?
     
     func makeUIView(context: Context) -> UIView {
-        let view = UIView()
+        let view = UIView(frame: .zero)
+        view.backgroundColor = .black
+        
         if let layer = previewLayer {
-            layer.frame = view.bounds
+            layer.videoGravity = .resizeAspectFill
             view.layer.addSublayer(layer)
         }
         return view
@@ -64,7 +75,11 @@ struct CameraPreviewView: UIViewRepresentable {
     
     func updateUIView(_ uiView: UIView, context: Context) {
         if let layer = previewLayer {
-            layer.frame = uiView.bounds
+            CATransaction.begin()
+            CATransaction.setAnimationDuration(0)
+            layer.frame = uiView.layer.bounds
+            layer.position = CGPoint(x: uiView.layer.bounds.midX, y: uiView.layer.bounds.midY)
+            CATransaction.commit()
         }
     }
 }
