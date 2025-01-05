@@ -10,5 +10,7 @@
 			<integer>0</integer>
 		</dict>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>This app needs access to camera to capture and stream video</string>
 </dict>
 </plist>

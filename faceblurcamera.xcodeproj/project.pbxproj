@@ -236,10 +236,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				3BDD3F902D2B0B4D00E9651B /* ContentView.swift in Sources */,
-				3BDD3F912D2B0B4D00E9651B /* CameraManager.swift in Sources */,
-				3BDD3F922D2B0B4D00E9651B /* RTSPStreamer.swift in Sources */,
-				3BDD3F932D2B0B4D00E9651B /* faceblurcameraApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -403,6 +399,7 @@
 				DEVELOPMENT_TEAM = 8CZ8V3YSRU;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "This app needs access to camera to capture and stream video";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -432,6 +429,7 @@
 				DEVELOPMENT_TEAM = 8CZ8V3YSRU;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "This app needs access to camera to capture and stream video";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
