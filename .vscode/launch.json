@@ -1,0 +1,16 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "FaceBlurCamera iOS",
+            "type": "lldb",
+            "request": "launch",
+            "sourceLanguages": ["swift"],
+            "program": "${workspaceFolder}/build/Debug-iphonesimulator/faceblurcamera.app",
+            "preLaunchTask": "swift-build",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+        }
+    ]
+}
