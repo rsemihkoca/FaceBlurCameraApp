@@ -34,4 +34,9 @@ uygulama açılınca rtsp yayını başlatılacak. ve ekranda yatay olarak gör�
 
 rm -rf ~/Library/Developer/Xcode/DerivedData/faceblurcamera-*
 
+
+## Executable path is directory:
+faceblurcamera üzerine geldim folder olan, build rules each file yaptım ve target membership'i faceblurcameraApp yaptım.
+
+copy bundle resources'tan info.plist'i çıkarttım.
 ![alt text](image.png)
